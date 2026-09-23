@@ -2,77 +2,280 @@
 
 [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/kernels/welcome?src=https://github.com/toolboxlap-ve/TOOLBOXLAP-kaggle-api/blob/main/kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb)
 
-**TOOLBOXLAP** turns a Kaggle GPU session into a temporary OpenAI-compatible API. It installs and runs Ollama without systemd, loads a Hugging Face GGUF or Ollama model, applies a GPU-oriented configuration, and publishes a local proxy through ngrok.
+**TOOLBOXLAP** turns a Kaggle GPU session into a temporary OpenAI-compatible API powered by Ollama.
 
-Website: [toolboxlap.com](https://toolboxlap.com)<br>
-YouTube: [@TOOLBOXLAP-u1c](https://www.youtube.com/@TOOLBOXLAP-u1c)
+It is designed to be simple to use and simple to explain:
 
-## What it provides
+**GitHub → Open in Kaggle → GPU + Internet → choose model → ngrok token → copy Base URL → use in Cline**
 
-The notebook exposes these routes through a temporary public ngrok URL. The proxy accepts both the standard `/v1` form and the same endpoints without `/v1`, so clients do not need provider-specific URL tricks.
+Website: [toolboxlap.com](https://toolboxlap.com)  |  YouTube: [@TOOLBOXLAP-u1c](https://www.youtube.com/@TOOLBOXLAP-u1c)  |  GitHub: [TOOLBOXLAP-kaggle-api](https://github.com/toolboxlap-ve/TOOLBOXLAP-kaggle-api)
+
+## What this project does
+
+The notebook starts a temporary model-serving stack inside a Kaggle GPU session:
+
+```text
+Kaggle GPU
+   ↓
+Ollama
+   ↓
+Hugging Face GGUF or Ollama model
+   ↓
+TOOLBOXLAP OpenAI-compatible proxy
+   ↓
+ngrok HTTPS tunnel
+   ↓
+Cline / other OpenAI-compatible clients
+```
+
+The public API exposes:
 
 - `GET /health`
-- `GET /v1/models` — advertises the stable public model ID `toolboxlap`
-- `POST /v1/chat/completions` — forwards requests to the selected Ollama backend
+- `GET /v1/models`
+- `POST /v1/chat/completions`
 
-The proxy automatically normalizes common client differences: it forces `reasoning_effort: none`, converts `max_completion_tokens` to Ollama's `max_tokens`, supplies a 32768-token default when no output limit is provided, removes common unsupported OpenAI-only fields, and normalizes common tool-call message edge cases. Messages, tools, and streaming are otherwise preserved. The model name sent by a client is replaced with the selected backend model, so clients should use `toolboxlap`.
+Clients use the stable public model ID:
 
-## Kaggle setup
+```text
+toolboxlap
+```
 
-1. Open the [TOOLBOXLAP Kaggle notebook](https://github.com/toolboxlap-ve/TOOLBOXLAP-kaggle-api/blob/main/kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb) in Kaggle with the button above, then select **Save Version** or **Copy & Edit**.
-2. In notebook settings, enable a **GPU** accelerator and enable **Internet**.
-3. Run the notebook. Its single Python cell downloads the current versioned launcher from this repository, installs required runtime dependencies (including `zstd` if missing), starts Ollama directly, and asks for a model.
-4. At `Model [ENTER = default]:`, press Enter for the supplied TOOLBOXLAP V6 baseline model or enter another supported model reference.
-5. Enter your own ngrok authtoken when asked. It is used only in that Kaggle session; it is never written to this repository.
-6. Copy the generated **Base URL** (`https://…ngrok…/v1`) into your client. The Cline Model ID is exactly `toolboxlap`.
+The proxy routes that public ID to the backend model selected when the Kaggle session starts.
 
-The launch process first attempts a 131072-token context. It uses `ollama ps` to inspect placement and restarts with 65536 if CPU offload is detected. Use the **Active context** printed at the end in your client configuration.
+## Quick start
 
-## Model selection
+### 1. Open the notebook
 
-The default is:
+Use the **Open in Kaggle** button at the top of this README.
+
+You can also open the notebook file directly:
+
+[TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb](https://github.com/toolboxlap-ve/TOOLBOXLAP-kaggle-api/blob/main/kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb)
+
+### 2. Enable Kaggle GPU and Internet
+
+In the Kaggle notebook settings:
+
+```text
+Accelerator: GPU
+Internet: ON
+```
+
+The notebook is intended to run inside a Kaggle GPU session.
+
+### 3. Run the single cell
+
+The notebook has one runnable Python cell.
+
+It downloads the current launcher from this repository instead of duplicating the full launcher code inside the notebook.
+
+You will be asked:
+
+```text
+Model [ENTER = default: ...]:
+```
+
+Press **Enter** to use the TOOLBOXLAP default model.
+
+Then enter your own ngrok authtoken. The token is supplied at runtime and is not stored in this repository.
+
+### 4. Copy the generated Base URL
+
+When startup finishes, the notebook prints a block like:
+
+```text
+======================================================================
+
+✅ TOOLBOXLAP PUBLIC API READY
+
+======================================================================
+
+COPY THIS BASE URL INTO CLINE:
+https://xxxxxxxx.ngrok-free.dev/v1
+
+Cline Model ID:
+toolboxlap
+
+Custom Header: ngrok-skip-browser-warning = true
+
+Backend model:
+hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M
+
+Active context:
+131072
+
+Public API test HTTP:
+200
+
+Public API response:
+TOOLBOXLAP PUBLIC API WORKING
+
+✅ EVERYTHING IS WORKING
+```
+
+Copy the **entire Base URL exactly as printed**.
+
+Do not manually add another `/v1`.
+
+### 5. Configure Cline
+
+Use:
+
+| Setting | Value |
+| --- | --- |
+| Provider | OpenAI Compatible |
+| Base URL | the generated URL printed by the notebook |
+| API Key | any placeholder value if Cline requires one |
+| Model ID | `toolboxlap` |
+| Custom Header | `ngrok-skip-browser-warning = true` |
+| Context Window | the printed **Active context** |
+| Max Output Tokens | `32768` |
+| Reasoning Effort | None |
+
+The local TOOLBOXLAP proxy does not require an upstream API key.
+
+## Choosing another model
+
+The default model is:
 
 ```text
 hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q4_K_M
 ```
 
-You can paste a Hugging Face GGUF/Ollama reference, for example:
+At the model prompt, you can press Enter or paste another supported model reference.
+
+### Hugging Face GGUF
+
+Use an Ollama-compatible `hf.co` reference:
 
 ```text
-hf.co/owner/gguf-repository:Q4_K_M
+hf.co/OWNER/REPOSITORY:Q4_K_M
 ```
 
-You can also paste an Ollama model identifier such as:
+Example:
+
+```text
+hf.co/your-org/your-gguf-model:Q4_K_M
+```
+
+A Hugging Face model-page URL is also accepted:
+
+```text
+https://huggingface.co/OWNER/REPOSITORY
+```
+
+For GGUF files, you can also use a file URL; the launcher derives the GGUF filename as the tag.
+
+### Ollama model
+
+You can enter a normal Ollama model ID, for example:
 
 ```text
 llama3.2:3b
 ```
 
-Hugging Face model-page URLs are accepted too. For example, `https://huggingface.co/owner/gguf-repository` becomes `hf.co/owner/gguf-repository`. If the URL identifies a GGUF file, its filename (without `.gguf`) is used as the tag. For best results, use an Ollama-compatible `hf.co/owner/repository:quantization` reference.
+The public client-facing Model ID remains:
 
-## Cline configuration
+```text
+toolboxlap
+```
 
-After the notebook prints its connection details, copy the exact **OpenAI Base URL** printed by the notebook. Do not manually append `/v1`; the printed URL already includes it. The proxy also accepts the root URL without `/v1` for clients that prefer it.
+Only the backend model changes.
 
-Configure Cline as follows:
+## Performance and context
 
-| Setting | Value |
-| --- | --- |
-| Provider | OpenAI Compatible |
-| Base URL | copy the exact **OpenAI Base URL** printed by the notebook (already includes `/v1`) |
-| Model ID | `toolboxlap` |
-| Custom Header | `ngrok-skip-browser-warning = true` |
-| Context Window | the **Active context** printed by the notebook |
-| Max Output Tokens | `32768` |
-| Reasoning Effort | None |
+The launcher is configured for the tested Kaggle GPU workflow.
 
-No API key is required by the local proxy unless your client insists on one; any placeholder value may be used in that case.
+It starts with:
 
-## ngrok and secrets
+```text
+Context target: 131072
+```
 
-ngrok provides a public HTTPS tunnel to the Kaggle proxy. Its URL is **temporary**: it changes when the ngrok process or Kaggle session ends. Treat it as session-scoped access and stop the notebook when finished.
+It checks placement with `ollama ps`.
 
-Never commit ngrok authtokens, Hugging Face tokens, API keys, `.env` files, Kaggle credentials, or generated tunnel configuration. This repository’s `.gitignore` intentionally excludes common secret and token files.
+If CPU offload is detected, it restarts with:
+
+```text
+Fallback context: 65536
+```
+
+The notebook prints the **Active context** actually being used. Use that number in the client.
+
+The current tuned Ollama environment includes:
+
+```text
+OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0
+OLLAMA_NUM_PARALLEL=1
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_KEEP_ALIVE=30m
+```
+
+## ngrok
+
+ngrok provides the temporary HTTPS public endpoint.
+
+The URL is session-scoped and can change when the Kaggle session or ngrok process ends.
+
+Keep the Kaggle cell running while the API is being used. Stop the session when you are finished.
+
+The ngrok command uses host-header rewriting so the public tunnel forwards correctly to the local proxy.
+
+## Security
+
+Never commit:
+
+- ngrok authtokens
+- Hugging Face tokens
+- API keys
+- Kaggle credentials
+- `.env` files
+- generated ngrok configuration
+
+The notebook asks for the ngrok token at runtime.
+
+Do not publish your personal token in a video, screenshot, README, Git commit, or GitHub issue.
+
+## Repository structure
+
+```text
+TOOLBOXLAP-kaggle-api/
+├── README.md
+├── LICENSE
+├── .gitignore
+├── kaggle/
+│   └── TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb
+├── scripts/
+│   └── toolboxlap_kaggle_hf_ollama_ngrok.py
+└── .github/
+    └── ISSUE_TEMPLATE/
+        └── bug_report.md
+```
+
+The notebook is intentionally small. The full launcher lives in `scripts/`, so updates can be published without duplicating the main Python code into the notebook.
+
+## Simple video flow
+
+For a walkthrough video, the intended sequence is:
+
+```text
+1. Open the GitHub repository
+2. Click Open in Kaggle
+3. Turn on GPU
+4. Turn on Internet
+5. Run the notebook
+6. Press Enter for the default model
+7. Enter the ngrok token
+8. Wait for EVERYTHING IS WORKING
+9. Copy the printed Base URL
+10. Open Cline
+11. Select OpenAI Compatible
+12. Paste Base URL
+13. Set Model ID = toolboxlap
+14. Add ngrok-skip-browser-warning = true
+15. Send "hi"
+```
 
 ## Local validation
 
@@ -81,4 +284,6 @@ python -m py_compile scripts/toolboxlap_kaggle_hf_ollama_ngrok.py
 python -m json.tool kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb > /dev/null
 ```
 
-MIT licensed. © TOOLBOXLAP.
+## License
+
+MIT License — © TOOLBOXLAP.
