@@ -59,7 +59,7 @@ Configure Cline as follows:
 | Setting | Value |
 | --- | --- |
 | Provider | OpenAI Compatible |
-| Base URL | copy the exact **OpenAI Base URL** printed by the notebook |
+| Base URL | copy the exact **OpenAI Base URL** printed by the notebook (already includes `/v1`) |
 | Model ID | `toolboxlap` |
 | Custom Header | `ngrok-skip-browser-warning = true` |
 | Context Window | the **Active context** printed by the notebook |
