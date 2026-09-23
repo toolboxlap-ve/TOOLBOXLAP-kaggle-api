@@ -1,0 +1,28 @@
+# Secrets and runtime configuration
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*token*
+*credentials*
+ngrok.yml
+ngrok.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter / Kaggle
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
