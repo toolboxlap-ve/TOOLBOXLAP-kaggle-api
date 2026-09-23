@@ -19,11 +19,12 @@ Messages, tools, streaming, and other compatible request fields are passed throu
 
 ## Kaggle setup
 
-1. Open [`kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb`](kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb) in Kaggle with the button above, then select **Save Version** or **Copy & Edit**.
-2. In notebook settings, choose a **GPU** accelerator and turn **Internet** on.
-3. Run the notebook cell. It downloads the launcher from this repository, installs required runtime dependencies (including `zstd` if missing), starts Ollama directly, and asks for a model.
-4. At `Model [ENTER = default]:`, press Enter for the supplied TOOLBOXLAP V6 baseline model or enter a model reference.
-5. Paste your ngrok authtoken when asked. It is used only in that Kaggle session; it is never written to this repository.
+1. Open the [TOOLBOXLAP Kaggle notebook](https://github.com/toolboxlap-ve/TOOLBOXLAP-kaggle-api/blob/main/kaggle/TOOLBOXLAP-Kaggle-HF-Ollama-ngrok.ipynb) in Kaggle with the button above, then select **Save Version** or **Copy & Edit**.
+2. In notebook settings, enable a **GPU** accelerator and enable **Internet**.
+3. Run the notebook. Its single Python cell downloads the current versioned launcher from this repository, installs required runtime dependencies (including `zstd` if missing), starts Ollama directly, and asks for a model.
+4. At `Model [ENTER = default]:`, press Enter for the supplied TOOLBOXLAP V6 baseline model or enter another supported model reference.
+5. Enter your own ngrok authtoken when asked. It is used only in that Kaggle session; it is never written to this repository.
+6. Copy the generated **Base URL** (`https://…ngrok…/v1`) into your client. The Cline Model ID is exactly `toolboxlap`.
 
 The launch process first attempts a 131072-token context. It uses `ollama ps` to inspect placement and restarts with 65536 if CPU offload is detected. Use the **Active context** printed at the end in your client configuration.
 
