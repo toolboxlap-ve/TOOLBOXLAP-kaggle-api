@@ -197,6 +197,126 @@ def tunnel_url(timeout: int = 45) -> str:
     raise TimeoutError("ngrok did not publish an HTTPS tunnel.")
 
 
+
+def sanitize_tool_schema(value: Any) -> Any:
+    """Make common agent-generated JSON Schema safer for Ollama's Go parser."""
+    if isinstance(value, list):
+        return [sanitize_tool_schema(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    cleaned: dict[str, Any] = {}
+    for key, item in value.items():
+        # Ollama's OpenAI-compatible tool parser does not document these
+        # OpenAI-specific schema/function extensions.
+        if key in {"strict", "$schema"}:
+            continue
+
+        # Some generators can emit conditional required objects. Ollama's
+        # parser expects required to be an array of strings.
+        if key == "required" and not isinstance(item, list):
+            continue
+
+        cleaned[key] = sanitize_tool_schema(item)
+
+    return cleaned
+
+
+def build_safe_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Build a minimal OpenAI-compatible request for an Ollama retry.
+
+    The first request preserves the client's compatible fields. If Ollama
+    rejects that request with a 4xx validation error, the proxy retries once
+    with provider-specific extras removed.
+    """
+    safe = dict(payload)
+
+    safe.pop("tool_choice", None)
+    safe.pop("parallel_tool_calls", None)
+    safe.pop("store", None)
+    safe.pop("metadata", None)
+    safe.pop("service_tier", None)
+    safe.pop("logprobs", None)
+    safe.pop("top_logprobs", None)
+    safe.pop("modalities", None)
+    safe.pop("audio", None)
+    safe.pop("max_completion_tokens", None)
+    safe.pop("stream_options", None)
+
+    # If JSON-schema response formatting is the incompatible part, let the
+    # second attempt proceed as a normal text response rather than failing
+    # the whole agent request.
+    response_format = safe.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
+        safe.pop("response_format", None)
+
+    if "max_tokens" not in safe:
+        safe["max_tokens"] = 32768
+
+    if isinstance(safe.get("tools"), list):
+        safe["tools"] = sanitize_tool_schema(safe["tools"])
+
+    if isinstance(safe.get("messages"), list):
+        safe["messages"] = sanitize_tool_schema(safe["messages"])
+
+    return safe
+
+
+def proxy_request_with_compat_retry(
+    payload: dict[str, Any],
+    headers: dict[str, str],
+) -> Any:
+    """POST to Ollama; on HTTP 400/422, retry once with a sanitized body."""
+    requests = require_requests()
+
+    upstream = requests.post(
+        f"{OLLAMA_URL}/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        stream=bool(payload.get("stream")),
+        timeout=900,
+    )
+
+    if upstream.status_code not in {400, 422}:
+        return upstream
+
+    first_error = upstream.text[:4000]
+    safe_payload = build_safe_openai_payload(payload)
+
+    # Streaming responses are not buffered, so the retry can only safely be
+    # performed when the first response is a validation failure.
+    retry = requests.post(
+        f"{OLLAMA_URL}/v1/chat/completions",
+        json=safe_payload,
+        headers=headers,
+        stream=bool(safe_payload.get("stream")),
+        timeout=900,
+    )
+
+    if retry.status_code >= 400:
+        print(
+            f"⚠️ Ollama first response HTTP {upstream.status_code}: "
+            f"{first_error}",
+            flush=True,
+        )
+        print(
+            f"⚠️ Ollama compatibility retry HTTP {retry.status_code}: "
+            f"{retry.text[:4000]}",
+            flush=True,
+        )
+    else:
+        print(
+            f"ℹ️ TOOLBOXLAP compatibility retry succeeded after "
+            f"HTTP {upstream.status_code}.",
+            flush=True,
+        )
+
+    upstream.close()
+    return retry
+
+
 def serve_proxy(backend: str, port: int) -> None:
     try:
         from fastapi import FastAPI, HTTPException, Request
@@ -216,7 +336,12 @@ def serve_proxy(backend: str, port: int) -> None:
             response.raise_for_status()
         except requests.RequestException as exc:
             raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}") from exc
-        return {"status": "ok", "model": PUBLIC_MODEL_ID, "backend": backend}
+        return {
+            "status": "ok",
+            "service": "TOOLBOXLAP",
+            "model": PUBLIC_MODEL_ID,
+            "backend": backend,
+        }
 
     @app.get("/models")
     @app.get("/v1/models")
@@ -293,12 +418,9 @@ def serve_proxy(backend: str, port: int) -> None:
         }
 
         try:
-            upstream = requests.post(
-                f"{OLLAMA_URL}/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                stream=bool(payload.get("stream")),
-                timeout=900,
+            upstream = proxy_request_with_compat_retry(
+                payload,
+                headers,
             )
         except requests.RequestException as exc:
             raise HTTPException(
