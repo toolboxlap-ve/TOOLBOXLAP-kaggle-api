@@ -8,6 +8,7 @@ start only the proxy after Ollama has been configured.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -15,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import sys
 import time
 from pathlib import Path
