@@ -218,10 +218,12 @@ def serve_proxy(backend: str, port: int) -> None:
             raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}") from exc
         return {"status": "ok", "model": PUBLIC_MODEL_ID, "backend": backend}
 
+    @app.get("/models")
     @app.get("/v1/models")
     def models() -> dict[str, Any]:
         return {"object": "list", "data": [{"id": PUBLIC_MODEL_ID, "object": "model", "owned_by": "TOOLBOXLAP"}]}
 
+    @app.post("/chat/completions")
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
         try:
@@ -230,22 +232,96 @@ def serve_proxy(backend: str, port: int) -> None:
             raise HTTPException(status_code=400, detail="Request body must be JSON.") from exc
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+
+        # Normalize common OpenAI-compatible client differences at the proxy boundary.
+        # Keep the client-facing model ID stable while routing to the selected backend.
         payload["model"] = backend
         payload["reasoning_effort"] = "none"
-        headers = {key: value for key, value in request.headers.items()
-                   if key.lower() not in {"host", "content-length"}}
+
+        # Ollama's documented OpenAI-compatible endpoint uses max_tokens.
+        if "max_tokens" not in payload and "max_completion_tokens" in payload:
+            payload["max_tokens"] = payload["max_completion_tokens"]
+        payload.pop("max_completion_tokens", None)
+
+        if "max_tokens" not in payload:
+            payload["max_tokens"] = 32768
+
+        # Remove common OpenAI-only fields that Ollama does not document for
+        # /v1/chat/completions and that can cause compatibility failures.
+        for unsupported in (
+            "parallel_tool_calls",
+            "store",
+            "metadata",
+            "service_tier",
+            "logprobs",
+            "top_logprobs",
+            "modalities",
+            "audio",
+        ):
+            payload.pop(unsupported, None)
+
+        # Normalize common agent message edge cases.
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            normalized_messages = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    normalized_messages.append(message)
+                    continue
+
+                message = dict(message)
+
+                if message.get("role") == "developer":
+                    message["role"] = "system"
+
+                if (
+                    message.get("role") == "assistant"
+                    and message.get("tool_calls")
+                    and message.get("content") == ""
+                ):
+                    message["content"] = None
+
+                normalized_messages.append(message)
+
+            payload["messages"] = normalized_messages
+
+        headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.lower() not in {"host", "content-length"}
+        }
+
         try:
             upstream = requests.post(
-                f"{OLLAMA_URL}/v1/chat/completions", json=payload, headers=headers,
-                stream=bool(payload.get("stream")), timeout=900,
+                f"{OLLAMA_URL}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                stream=bool(payload.get("stream")),
+                timeout=900,
             )
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Ollama request failed: {exc}") from exc
-        content_type = upstream.headers.get("content-type", "application/json")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Ollama request failed: {exc}",
+            ) from exc
+
+        content_type = upstream.headers.get(
+            "content-type",
+            "application/json",
+        )
+
         if payload.get("stream"):
-            return StreamingResponse(upstream.iter_content(chunk_size=None), status_code=upstream.status_code,
-                                     media_type=content_type)
-        return Response(content=upstream.content, status_code=upstream.status_code, media_type=content_type)
+            return StreamingResponse(
+                upstream.iter_content(chunk_size=None),
+                status_code=upstream.status_code,
+                media_type=content_type,
+            )
+
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=content_type,
+        )
 
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
@@ -300,6 +376,7 @@ def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None)
         test.raise_for_status()
         print("\nPublic URL:", public_url)
         print("OpenAI Base URL:", f"{public_url}/v1")
+        print("OpenAI Base URL (root also accepted):", public_url)
         print("Model ID = toolboxlap")
         print("Backend model:", selected)
         print("Active context:", context)
