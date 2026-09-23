@@ -250,9 +250,20 @@ def serve_proxy(backend: str, port: int) -> None:
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
 
-def interactive() -> None:
+def configured_value(value: str | None, env_name: str) -> str | None:
+    """Return an explicit CLI value or environment value without prompting."""
+    if value is not None:
+        return value.strip()
+    env_value = os.getenv(env_name)
+    return env_value.strip() if env_value is not None else None
+
+
+def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None) -> None:
     print("TOOLBOXLAP — Kaggle Hugging Face / Ollama / ngrok API")
-    selected = normalize_model(input(f"Model [ENTER = default]: ").strip())
+    selected_input = configured_value(model, "TOOLBOXLAP_MODEL")
+    if selected_input is None:
+        selected_input = input(f"Model [ENTER = default]: ").strip()
+    selected = normalize_model(selected_input)
     print(f"Selected backend model: {selected}")
     ensure_zstd()
     ensure_ollama()
@@ -275,10 +286,13 @@ def interactive() -> None:
                                   "--backend", selected, "--port", str(PROXY_PORT)])
         wait_for_proxy(PROXY_PORT)
         install_ngrok()
-        authtoken = input("ngrok authtoken (used only for this Kaggle session): ").strip()
+        authtoken = configured_value(ngrok_authtoken, "NGROK_AUTHTOKEN")
+        if authtoken is None:
+            authtoken = input("ngrok authtoken (used only for this Kaggle session): ").strip()
         if not authtoken:
             raise ValueError("An ngrok authtoken is required to create a public tunnel.")
-        run(["ngrok", "config", "add-authtoken", authtoken])
+        print("+ ngrok config add-authtoken [redacted]")
+        subprocess.run(["ngrok", "config", "add-authtoken", authtoken], check=True, text=True)
         ngrok = subprocess.Popen(["ngrok", "http", f"--host-header=rewrite", str(PROXY_PORT), "--log", "stdout"])
         public_url = tunnel_url()
         requests = require_requests()
@@ -307,11 +321,13 @@ def main() -> None:
     parser.add_argument("--serve", action="store_true", help="Run only the local proxy.")
     parser.add_argument("--backend", default=DEFAULT_MODEL)
     parser.add_argument("--port", type=int, default=PROXY_PORT)
+    parser.add_argument("--model", help="Backend model; overrides TOOLBOXLAP_MODEL.")
+    parser.add_argument("--ngrok-authtoken", help="ngrok token; overrides NGROK_AUTHTOKEN.")
     args = parser.parse_args()
     if args.serve:
         serve_proxy(args.backend, args.port)
     else:
-        interactive()
+        interactive(model=args.model, ngrok_authtoken=args.ngrok_authtoken)
 
 
 if __name__ == "__main__":
