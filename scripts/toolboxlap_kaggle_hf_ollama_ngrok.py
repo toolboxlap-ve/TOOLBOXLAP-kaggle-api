@@ -318,227 +318,430 @@ def proxy_request_with_compat_retry(
 
 
 def serve_proxy(backend: str, port: int) -> None:
+    """Run the TOOLBOXLAP proxy in the current process.
+
+    This is intentionally Flask/thread based because it matches the known-good
+    Kaggle V6 execution path and keeps streaming requests simple.
+    """
     try:
-        from fastapi import FastAPI, HTTPException, Request
-        from fastapi.responses import JSONResponse, Response, StreamingResponse
-        import requests
-        import uvicorn
+        from flask import Flask, Response, jsonify, request, stream_with_context
     except ImportError:
-        run([sys.executable, "-m", "pip", "install", "-q", "fastapi", "uvicorn", "requests"])
-        return serve_proxy(backend, port)
+        run([sys.executable, "-m", "pip", "install", "-q", "-U", "flask"])
+        from flask import Flask, Response, jsonify, request, stream_with_context
 
-    app = FastAPI(title="TOOLBOXLAP Proxy", docs_url=None, redoc_url=None)
+    import requests
 
-    @app.get("/health")
-    def health() -> dict[str, Any]:
-        try:
-            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}") from exc
-        return {
-            "status": "ok",
-            "service": "TOOLBOXLAP",
-            "model": PUBLIC_MODEL_ID,
-            "backend": backend,
+    app = Flask("toolboxlap_proxy")
+
+    def forwarded_headers():
+        blocked = {
+            "host",
+            "content-length",
+            "connection",
+            "transfer-encoding",
         }
-
-    @app.get("/models")
-    @app.get("/v1/models")
-    def models() -> dict[str, Any]:
-        return {"object": "list", "data": [{"id": PUBLIC_MODEL_ID, "object": "model", "owned_by": "TOOLBOXLAP"}]}
-
-    @app.post("/chat/completions")
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request) -> Response:
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="Request body must be JSON.") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
-
-        # Normalize common OpenAI-compatible client differences at the proxy boundary.
-        # Keep the client-facing model ID stable while routing to the selected backend.
-        payload["model"] = backend
-        payload["reasoning_effort"] = "none"
-
-        # Ollama's documented OpenAI-compatible endpoint uses max_tokens.
-        if "max_tokens" not in payload and "max_completion_tokens" in payload:
-            payload["max_tokens"] = payload["max_completion_tokens"]
-        payload.pop("max_completion_tokens", None)
-
-        if "max_tokens" not in payload:
-            payload["max_tokens"] = 32768
-
-        # Remove common OpenAI-only fields that Ollama does not document for
-        # /v1/chat/completions and that can cause compatibility failures.
-        for unsupported in (
-            "parallel_tool_calls",
-            "tool_choice",
-            "store",
-            "metadata",
-            "service_tier",
-            "logprobs",
-            "top_logprobs",
-            "modalities",
-            "audio",
-        ):
-            payload.pop(unsupported, None)
-
-        # Normalize common agent message edge cases.
-        messages = payload.get("messages")
-        if isinstance(messages, list):
-            normalized_messages = []
-            for message in messages:
-                if not isinstance(message, dict):
-                    normalized_messages.append(message)
-                    continue
-
-                message = dict(message)
-
-                if message.get("role") == "developer":
-                    message["role"] = "system"
-
-                if (
-                    message.get("role") == "assistant"
-                    and message.get("tool_calls")
-                    and message.get("content") == ""
-                ):
-                    message["content"] = None
-
-                normalized_messages.append(message)
-
-            payload["messages"] = normalized_messages
-
-        headers = {
+        return {
             key: value
             for key, value in request.headers.items()
-            if key.lower() not in {"host", "content-length"}
+            if key.lower() not in blocked
         }
 
+    @app.get("/health")
+    def health():
+        return jsonify({
+            "status": "ok",
+            "service": "TOOLBOXLAP",
+            "model": backend,
+            "context": globals().get("ACTIVE_CONTEXT"),
+        })
+
+    @app.get("/v1/models")
+    def models():
+        return jsonify({
+            "object": "list",
+            "data": [{
+                "id": PUBLIC_MODEL_ID,
+                "object": "model",
+                "owned_by": "toolboxlap",
+            }],
+        })
+
+    @app.post("/v1/chat/completions")
+    def chat_completions():
+        body = request.get_json(silent=True)
+
+        if not isinstance(body, dict):
+            return jsonify({
+                "error": {"message": "JSON body required."}
+            }), 400
+
+        # Keep the client-facing ID stable and route internally to the selected
+        # backend. Preserve the rest of the client's OpenAI-compatible payload.
+        body["model"] = backend
+        body["reasoning_effort"] = "none"
+
+        if (
+            "max_tokens" not in body
+            and "max_completion_tokens" not in body
+        ):
+            body["max_tokens"] = 32768
+
+        streaming = bool(body.get("stream", False))
+
         try:
-            upstream = proxy_request_with_compat_retry(
-                payload,
-                headers,
+            upstream = requests.post(
+                OLLAMA_URL + "/v1/chat/completions",
+                headers=forwarded_headers(),
+                json=body,
+                stream=True,
+                timeout=900,
             )
         except requests.RequestException as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Ollama request failed: {exc}",
-            ) from exc
+            return jsonify({
+                "error": {"message": f"Ollama connection failed: {exc}"}
+            }), 502
 
-        if upstream.status_code >= 400:
-            print(
-                f"⚠️ Ollama returned HTTP {upstream.status_code}: "
-                f"{upstream.text[:2000]}",
-                flush=True,
+        if streaming:
+            content_type = upstream.headers.get(
+                "content-type",
+                "text/event-stream",
             )
 
-        content_type = upstream.headers.get(
-            "content-type",
-            "application/json",
-        )
+            @stream_with_context
+            def generate():
+                try:
+                    for chunk in upstream.iter_content(
+                        chunk_size=8192
+                    ):
+                        if chunk:
+                            yield chunk
+                finally:
+                    upstream.close()
 
-        if payload.get("stream"):
-            return StreamingResponse(
-                upstream.iter_content(chunk_size=None),
-                status_code=upstream.status_code,
-                media_type=content_type,
+            return Response(
+                generate(),
+                status=upstream.status_code,
+                content_type=content_type,
             )
 
         return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            media_type=content_type,
+            upstream.content,
+            status=upstream.status_code,
+            content_type=upstream.headers.get(
+                "content-type",
+                "application/json",
+            ),
         )
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+    )
 
 
 def configured_value(value: str | None, env_name: str) -> str | None:
-    """Return an explicit CLI value or environment value without prompting."""
-    if value is not None:
+    if value is not None and value.strip():
         return value.strip()
     env_value = os.getenv(env_name)
-    return env_value.strip() if env_value is not None else None
+    if env_value:
+        return env_value.strip()
+    return None
 
 
-def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None) -> None:
-    print("TOOLBOXLAP — Kaggle Hugging Face / Ollama / ngrok API", flush=True)
-    selected_input = configured_value(model, "TOOLBOXLAP_MODEL")
-    if selected_input is None:
-        selected_input = input(f"Model [ENTER = default]: ").strip()
-    selected = normalize_model(selected_input)
-    print(f"Selected backend model: {selected}", flush=True)
+def choose_model(explicit: str | None = None) -> str:
+    value = configured_value(explicit, "TOOLBOXLAP_MODEL")
+    if value is None:
+        value = input(
+            f"Model [ENTER = default: {DEFAULT_MODEL}]: "
+        ).strip()
+
+    if not value:
+        return DEFAULT_MODEL
+
+    return normalize_model(value)
+
+
+def choose_ngrok_token(explicit: str | None = None) -> str:
+    value = configured_value(explicit, "NGROK_AUTHTOKEN")
+    if value is None:
+        value = getpass.getpass(
+            "ngrok authtoken (used only for this Kaggle session): "
+        ).strip()
+
+    if not value:
+        raise ValueError(
+            "An ngrok authtoken is required to create a public tunnel."
+        )
+
+    return value
+
+
+def start_proxy_thread(backend: str, port: int):
+    thread = threading.Thread(
+        target=serve_proxy,
+        args=(backend, port),
+        daemon=True,
+    )
+    thread.start()
+
+    deadline = time.monotonic() + 45
+    requests = require_requests()
+
+    while time.monotonic() < deadline:
+        try:
+            if requests.get(
+                f"http://127.0.0.1:{port}/health",
+                timeout=2,
+            ).ok:
+                return thread
+        except requests.RequestException:
+            pass
+        time.sleep(1)
+
+    raise TimeoutError("TOOLBOXLAP proxy did not become ready.")
+
+
+def interactive(
+    model: str | None = None,
+    ngrok_authtoken: str | None = None,
+) -> None:
+    print(
+        "TOOLBOXLAP — Kaggle Hugging Face / Ollama / ngrok API",
+        flush=True,
+    )
+
+    selected = choose_model(model)
+
+    print(
+        f"Selected backend model: {selected}",
+        flush=True,
+    )
+
     ensure_zstd()
     ensure_ollama()
-    ollama = start_ollama(HIGH_CONTEXT)
+
+    ollama_process = start_ollama(HIGH_CONTEXT)
     context = HIGH_CONTEXT
+
     try:
         pull_and_load(selected, context)
+
         uses_cpu, ps_output = placement_uses_cpu()
-        print("ollama ps:\n" + ps_output, flush=True)
+        print(
+            "ollama ps:\n" + ps_output,
+            flush=True,
+        )
+
         if uses_cpu:
-            print(f"CPU placement detected; restarting with {FALLBACK_CONTEXT} context.", flush=True)
-            stop_process(ollama)
-            ollama = start_ollama(FALLBACK_CONTEXT)
+            print(
+                f"CPU offload detected at {context:,} context.",
+                flush=True,
+            )
+            print(
+                f"Restarting Ollama with {FALLBACK_CONTEXT:,} context...",
+                flush=True,
+            )
+
+            stop_process(ollama_process)
+            ollama_process = start_ollama(FALLBACK_CONTEXT)
+
             context = FALLBACK_CONTEXT
             pull_and_load(selected, context)
-            _, ps_output = placement_uses_cpu()
-            print("ollama ps after fallback:\n" + ps_output, flush=True)
 
-        proxy = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--serve",
-                                  "--backend", selected, "--port", str(PROXY_PORT)])
-        wait_for_proxy(PROXY_PORT)
+            _, ps_output = placement_uses_cpu()
+
+            print(
+                "ollama ps after fallback:\n" + ps_output,
+                flush=True,
+            )
+
+        global ACTIVE_CONTEXT
+        ACTIVE_CONTEXT = context
+
+        start_proxy_thread(selected, PROXY_PORT)
+
+        ngrok_token = choose_ngrok_token(ngrok_authtoken)
+
         install_ngrok()
-        authtoken = configured_value(ngrok_authtoken, "NGROK_AUTHTOKEN")
-        if authtoken is None:
-            authtoken = input("ngrok authtoken (used only for this Kaggle session): ").strip()
-        if not authtoken:
-            raise ValueError("An ngrok authtoken is required to create a public tunnel.")
-        print("+ ngrok config add-authtoken [redacted]")
-        subprocess.run(["ngrok", "config", "add-authtoken", authtoken], check=True, text=True)
-        ngrok = subprocess.Popen(["ngrok", "http", f"--host-header=rewrite", str(PROXY_PORT), "--log", "stdout"])
+
+        print(
+            "+ ngrok config add-authtoken [redacted]",
+            flush=True,
+        )
+
+        subprocess.run(
+            [
+                "ngrok",
+                "config",
+                "add-authtoken",
+                ngrok_token,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        subprocess.run(
+            "pkill -f '/usr/local/bin/ngrok http' || true",
+            shell=True,
+        )
+        time.sleep(2)
+
+        ngrok_process = subprocess.Popen(
+            [
+                "ngrok",
+                "http",
+                str(PROXY_PORT),
+                "--host-header=rewrite",
+                "--log=stdout",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+
         public_url = tunnel_url()
+        base_url = public_url.rstrip("/") + "/v1"
+
         requests = require_requests()
-        test = requests.get(f"{public_url}/health", headers={"ngrok-skip-browser-warning": "true"}, timeout=30)
-        test.raise_for_status()
-        base_url = f"{public_url}/v1"
-        print("\n" + "=" * 72, flush=True)
-        print("✅ TOOLBOXLAP PUBLIC API READY", flush=True)
-        print("=" * 72, flush=True)
-        print("\nCOPY THIS BASE URL INTO CLINE:", flush=True)
-        print(base_url, flush=True)
-        print("\nCline Model ID:", PUBLIC_MODEL_ID, flush=True)
-        print("Custom Header: ngrok-skip-browser-warning = true", flush=True)
-        print("Backend model:", selected, flush=True)
-        print("Active context:", context, flush=True)
-        print("\n✅ EVERYTHING IS WORKING", flush=True)
-        print("Keep this cell running while you use the API. Interrupt it to close the tunnel.", flush=True)
+
+        # Verify exactly the public path Cline will call.
+        public_test = requests.post(
+            public_url + "/v1/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true",
+            },
+            json={
+                "model": PUBLIC_MODEL_ID,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Reply with exactly: "
+                        "TOOLBOXLAP PUBLIC API WORKING"
+                    ),
+                }],
+                "stream": False,
+                "max_tokens": 32,
+            },
+            timeout=300,
+        )
+
+        print(
+            "\n" + "=" * 72,
+            flush=True,
+        )
+        print(
+            "✅ TOOLBOXLAP PUBLIC API READY",
+            flush=True,
+        )
+        print(
+            "=" * 72,
+            flush=True,
+        )
+        print(
+            "\nCOPY THIS BASE URL INTO CLINE:",
+            flush=True,
+        )
+        print(
+            base_url,
+            flush=True,
+        )
+        print(
+            "\nCline Model ID:",
+            PUBLIC_MODEL_ID,
+            flush=True,
+        )
+        print(
+            "Custom Header: ngrok-skip-browser-warning = true",
+            flush=True,
+        )
+        print(
+            "Backend model:",
+            selected,
+            flush=True,
+        )
+        print(
+            "Active context:",
+            context,
+            flush=True,
+        )
+
+        print(
+            "\nPublic API test HTTP:",
+            public_test.status_code,
+            flush=True,
+        )
+
+        public_test.raise_for_status()
+
+        print(
+            "Public API response:",
+            public_test.json()["choices"][0]["message"]["content"],
+            flush=True,
+        )
+
+        print(
+            "\n✅ EVERYTHING IS WORKING",
+            flush=True,
+        )
+        print(
+            "Keep this Kaggle session running while the API is in use.",
+            flush=True,
+        )
+
         try:
             while True:
                 time.sleep(60)
         except KeyboardInterrupt:
-            print("Stopping TOOLBOXLAP services.")
-            stop_process(ngrok)
-            stop_process(proxy)
+            print(
+                "Stopping TOOLBOXLAP services.",
+                flush=True,
+            )
+            stop_process(ngrok_process)
+
     finally:
-        stop_process(ollama)
+        stop_process(ollama_process)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--serve", action="store_true", help="Run only the local proxy.")
-    parser.add_argument("--backend", default=DEFAULT_MODEL)
-    parser.add_argument("--port", type=int, default=PROXY_PORT)
-    parser.add_argument("--model", help="Backend model; overrides TOOLBOXLAP_MODEL.")
-    parser.add_argument("--ngrok-authtoken", help="ngrok token; overrides NGROK_AUTHTOKEN.")
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run only the local proxy.",
+    )
+    parser.add_argument(
+        "--backend",
+        default=DEFAULT_MODEL,
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=PROXY_PORT,
+    )
+    parser.add_argument(
+        "--model",
+        help="Backend model; overrides TOOLBOXLAP_MODEL.",
+    )
+    parser.add_argument(
+        "--ngrok-authtoken",
+        help="ngrok token; overrides NGROK_AUTHTOKEN.",
+    )
+
     args = parser.parse_args()
+
     if args.serve:
-        serve_proxy(args.backend, args.port)
+        serve_proxy(
+            normalize_model(args.backend),
+            args.port,
+        )
     else:
-        interactive(model=args.model, ngrok_authtoken=args.ngrok_authtoken)
+        interactive(
+            model=args.model,
+            ngrok_authtoken=args.ngrok_authtoken,
+        )
 
 
 if __name__ == "__main__":
