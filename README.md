@@ -12,8 +12,8 @@ YouTube: [@TOOLBOXLAP-u1c](https://www.youtube.com/@TOOLBOXLAP-u1c)
 The notebook exposes these routes through a temporary public ngrok URL. The proxy accepts both the standard `/v1` form and the same endpoints without `/v1`, so clients do not need provider-specific URL tricks.
 
 - `GET /health`
-- `GET /v1/models` and `GET /models` — advertise the stable public model ID `toolboxlap`
-- `POST /v1/chat/completions` and `POST /chat/completions` — forward requests to the selected Ollama backend
+- `GET /v1/models` — advertises the stable public model ID `toolboxlap`
+- `POST /v1/chat/completions` — forwards requests to the selected Ollama backend
 
 The proxy automatically normalizes common client differences: it forces `reasoning_effort: none`, converts `max_completion_tokens` to Ollama's `max_tokens`, supplies a 32768-token default when no output limit is provided, removes common unsupported OpenAI-only fields, and normalizes common tool-call message edge cases. Messages, tools, and streaming are otherwise preserved. The model name sent by a client is replaced with the selected backend model, so clients should use `toolboxlap`.
 
