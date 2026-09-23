@@ -250,6 +250,7 @@ def serve_proxy(backend: str, port: int) -> None:
         # /v1/chat/completions and that can cause compatibility failures.
         for unsupported in (
             "parallel_tool_calls",
+            "tool_choice",
             "store",
             "metadata",
             "service_tier",
@@ -305,6 +306,13 @@ def serve_proxy(backend: str, port: int) -> None:
                 detail=f"Ollama request failed: {exc}",
             ) from exc
 
+        if upstream.status_code >= 400:
+            print(
+                f"⚠️ Ollama returned HTTP {upstream.status_code}: "
+                f"{upstream.text[:2000]}",
+                flush=True,
+            )
+
         content_type = upstream.headers.get(
             "content-type",
             "application/json",
@@ -335,12 +343,12 @@ def configured_value(value: str | None, env_name: str) -> str | None:
 
 
 def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None) -> None:
-    print("TOOLBOXLAP — Kaggle Hugging Face / Ollama / ngrok API")
+    print("TOOLBOXLAP — Kaggle Hugging Face / Ollama / ngrok API", flush=True)
     selected_input = configured_value(model, "TOOLBOXLAP_MODEL")
     if selected_input is None:
         selected_input = input(f"Model [ENTER = default]: ").strip()
     selected = normalize_model(selected_input)
-    print(f"Selected backend model: {selected}")
+    print(f"Selected backend model: {selected}", flush=True)
     ensure_zstd()
     ensure_ollama()
     ollama = start_ollama(HIGH_CONTEXT)
@@ -348,15 +356,15 @@ def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None)
     try:
         pull_and_load(selected, context)
         uses_cpu, ps_output = placement_uses_cpu()
-        print("ollama ps:\n" + ps_output)
+        print("ollama ps:\n" + ps_output, flush=True)
         if uses_cpu:
-            print(f"CPU placement detected; restarting with {FALLBACK_CONTEXT} context.")
+            print(f"CPU placement detected; restarting with {FALLBACK_CONTEXT} context.", flush=True)
             stop_process(ollama)
             ollama = start_ollama(FALLBACK_CONTEXT)
             context = FALLBACK_CONTEXT
             pull_and_load(selected, context)
             _, ps_output = placement_uses_cpu()
-            print("ollama ps after fallback:\n" + ps_output)
+            print("ollama ps after fallback:\n" + ps_output, flush=True)
 
         proxy = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--serve",
                                   "--backend", selected, "--port", str(PROXY_PORT)])
@@ -374,14 +382,18 @@ def interactive(*, model: str | None = None, ngrok_authtoken: str | None = None)
         requests = require_requests()
         test = requests.get(f"{public_url}/health", headers={"ngrok-skip-browser-warning": "true"}, timeout=30)
         test.raise_for_status()
-        print("\nPublic URL:", public_url)
-        print("OpenAI Base URL:", f"{public_url}/v1")
-        print("OpenAI Base URL (root also accepted):", public_url)
-        print("Model ID = toolboxlap")
-        print("Backend model:", selected)
-        print("Active context:", context)
-        print("\nEVERYTHING IS WORKING")
-        print("Keep this cell running while you use the API. Interrupt it to close the tunnel.")
+        base_url = f"{public_url}/v1"
+        print("\n" + "=" * 72, flush=True)
+        print("✅ TOOLBOXLAP PUBLIC API READY", flush=True)
+        print("=" * 72, flush=True)
+        print("\nCOPY THIS BASE URL INTO CLINE:", flush=True)
+        print(base_url, flush=True)
+        print("\nCline Model ID:", PUBLIC_MODEL_ID, flush=True)
+        print("Custom Header: ngrok-skip-browser-warning = true", flush=True)
+        print("Backend model:", selected, flush=True)
+        print("Active context:", context, flush=True)
+        print("\n✅ EVERYTHING IS WORKING", flush=True)
+        print("Keep this cell running while you use the API. Interrupt it to close the tunnel.", flush=True)
         try:
             while True:
                 time.sleep(60)
